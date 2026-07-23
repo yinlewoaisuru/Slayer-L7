@@ -48,6 +48,7 @@ var zstdBombPayload []byte
 var startTime time.Time
 var statusCounts = make(map[string]int)
 var statusMutex = sync.Mutex{}
+var prevLines int = 0
 
 func init() {
     if uas, err := loadUserAgents("useragent.txt"); err == nil && len(uas) > 0 {
@@ -169,7 +170,7 @@ func drawUI(target, method, proxyFile string, workers, duration int) {
     }
     rps := float64(sent) / elapsed
 
-    fmt.Print("\033[H\033[2J")
+    fmt.Print("\033[H")
 
     logo := []string{
         "      _,met$$$$$gg.          ",
@@ -265,9 +266,13 @@ func drawUI(target, method, proxyFile string, workers, duration int) {
         if i < len(infoLines) {
             l += "  " + infoLines[i]
         }
-        fmt.Println(l)
+        fmt.Println(l + "\033[K")
     }
-    fmt.Println()
+
+    for i := maxLines; i < prevLines; i++ {
+        fmt.Println("\033[K")
+    }
+    prevLines = maxLines
 }
 
 const (
