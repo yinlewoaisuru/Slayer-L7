@@ -2099,7 +2099,7 @@ func mcBotJoin(targetURL string, stop <-chan struct{}) error {
     conn.Write(reqPacket)
 
     buf := make([]byte, 4096)
-    conn.SetReadDeadline(time.Now().Add(5 * time.Second)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
     conn.Read(buf)
 
     recordStatus("Sent")
