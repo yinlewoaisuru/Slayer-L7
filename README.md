@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=700&size=28&pause=1000&color=F7371F&center=true&vCenter=true&random=false&width=700&lines=SLAYER+L7;Advanced+Network+Stress+Testing;Layer+4+%26+Layer+7+Exploits;Built+with+Go+Concurrency" alt="Slayer L7" />
+<img src="https://readme-typing-svg.herokuapp.com?font=JetBrains+Mono&weight=700&size=28&pause=1000&color=a78bfa&center=true&vCenter=true&random=false&width=700&lines=SLAYER+L7;Advanced+Network+Stress+Testing;Layer+4+%26+Layer+7+Exploits;Built+with+Go+Concurrency" alt="Slayer L7" />
 
 <p align="center">
   <strong>Hệ thống kiểm tra ứng suất mạng đa giao thức, hiệu năng cao, tối ưu hóa Goroutine và vượt WAF.</strong>
@@ -242,7 +242,7 @@ Dự án này được phân phối dưới giấy phép **MIT License**. Xem fi
 <div align="center">
   <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" width="100%" />
   
-  <h3>Made with ❤️ by Nguyen Phan No</h3>
+  <h3>Made with ❤️ by @iw.uyenn._</h3>
   
   <a href="https://discord.gg/fccfwHzms8">
     <img src="https://img.shields.io/badge/Discord-Tham_gia_may_chu-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord">
