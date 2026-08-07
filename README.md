@@ -1,9 +1,16 @@
 <div align="center">
 
-<img src="https://readme-typing-svg.herokuapp.com?font=JetBrains+Mono&weight=700&size=28&pause=1000&color=a78bfa&center=true&vCenter=true&random=false&width=700&lines=SLAYER+L7;Advanced+Network+Stress+Testing;Layer+3+%2F+4+%2F+7+Exploits;Built+with+Go+Concurrency" alt="Slayer L7" />
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png">
+  <img alt="Divider" src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" width="100%">
+</picture>
+
+<h1>SLAYER L7</h1>
+<h3>Advanced Network Stress Testing & Protocol Exploitation</h3>
 
 <p align="center">
-  <strong>Hệ thống kiểm tra ứng suất mạng đa giao thức, hiệu năng cao, tối ưu hóa Goroutine và vượt WAF.</strong>
+  Hệ thống kiểm tra ứng suất mạng đa giao thức, hiệu năng cao, tối ưu hóa Goroutine và vượt WAF.
 </p>
 
 <p align="center">
@@ -15,34 +22,38 @@
 </p>
 
 <p align="center">
-  <a href="#warning-mien-tru-trach-nhiem">Disclaimer</a> •
-  <a href="#tong-quan">Tổng quan</a> •
-  <a href="#cai-dat">Cài đặt</a> •
-  <a href="#cac-method-tan-cong">Methods</a> •
-  <a href="#su-dung">Sử dụng</a> •
+  <a href="#disclaimer">Disclaimer</a> &bull;
+  <a href="#tong-quan">Tổng quan</a> &bull;
+  <a href="#cai-dat">Cài đặt</a> &bull;
+  <a href="#cac-method-tan-cong">Methods</a> &bull;
+  <a href="#su-dung">Sử dụng</a> &bull;
   <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
-<img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" width="100%" />
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png">
+  <img alt="Divider" src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" width="100%">
+</picture>
 
 </div>
 
-## ![Disclaimer](https://api.iconify.design/carbon:warning-alt.svg?color=FF4136&width=20) Miễn trừ trách nhiệm
+## Disclaimer
 
 > [!WARNING]
 > **Slayer L7** được thiết kế dành cho các quản trị viên hệ thống, nhà nghiên cứu bảo mật để kiểm tra ứng suất (Stress Testing) trên hệ thống của chính họ. Tôi không chịu trách nhiệm cho bất kỳ hành vi lạm dụng hoặc thiệt hại nào gây ra bởi công cụ này. Việc sử dụng tool vào mục đích tấn công máy chủ không được phép là vi phạm pháp luật.
 
-## ![Overview](https://api.iconify.design/carbon:cloud.svg?color=00ADD8&width=20) Tổng quan
+## Tong Quan
 
 **Slayer L7** không chỉ là một công cụ Flood HTTP thông thường. Nó là một nền tảng kiểm tra ứng suất toàn diện, kết hợp giữa nghệ thuật Bypass WAF, khai thác lỗ hổng Giao thức (Protocol Exploits) và Tối ưu hóa Hiệu năng (Go Concurrency).
 
-- ⚡ **Tốc độ ánh sáng:** Sử dụng Goroutines của Golang, có thể mở hàng nghìn luồng đồng thời với mức tiêu thụ RAM cực thấp.
-- 🛡️ **Đa hình (Polymorphic):** Tự động random hóa User-Agent, Payload, Header và Content-Type để đánh lừa WAF/CDN (Cloudflare, Akamai).
-- 📊 **Giao diện Neofetch:** CLI hiển thị realtime thống kê hệ thống, Status Code và RPS cực kỳ trực quan.
-- 🌐 **Hỗ trợ Proxy Native:** Tự động parse và xoay vòng SOCKS5, SOCKS4, HTTP proxies.
-- 🎯 **Đa giao thức:** Hỗ trợ tấn công từ Layer 7 (HTTP/HTTPS, WebSocket), Layer 4 (TCP/UDP) cho đến Layer 3 (ICMP) và các giao thức game (Minecraft).
+- **Tốc độ ánh sáng:** Sử dụng Goroutines của Golang, có thể mở hàng nghìn luồng đồng thời với mức tiêu thụ RAM cực thấp.
+- **Đa hình (Polymorphic):** Tự động random hóa User-Agent, Payload, Header và Content-Type để đánh lừa WAF/CDN (Cloudflare, Akamai).
+- **Giao diện Neofetch:** CLI hiển thị realtime thống kê hệ thống, Status Code và RPS cực kỳ trực quan.
+- **Hỗ trợ Proxy Native:** Tự động parse và xoay vòng SOCKS5, SOCKS4, HTTP proxies.
+- **Đa giao thức:** Hỗ trợ tấn công từ Layer 7 (HTTP/HTTPS, WebSocket), Layer 4 (TCP/UDP) cho đến Layer 3 (ICMP) và các giao thức game (Minecraft).
 
-## ![Installation](https://api.iconify.design/carbon:terminal.svg?color=2EA44F&width=20) Cài đặt
+## Cai Dat
 
 ### Yêu cầu hệ thống
 - [Go (Golang)](https://go.dev/dl/) phiên bản 1.21 trở lên.
@@ -66,7 +77,7 @@ go build -o slayer main.go
 chmod +x slayer
 ```
 
-## ![Config](https://api.iconify.design/carbon:settings.svg?color=a78bfa&width=20) Cấu hình CLI Arguments
+## Cau Hinh CLI Arguments
 
 Tool sử dụng các flag trực tiếp qua CLI, cho phép tùy chỉnh chi tiết tấn công:
 
@@ -80,12 +91,12 @@ Tool sử dụng các flag trực tiếp qua CLI, cho phép tùy chỉnh chi ti�
 | `-r` | `int` | Delay giữa các request trên 1 luồng (ms) | ❌ (Mặc định: `0`) |
 | `-v` | `bool` | In chi tiết lỗi ra console | ❌ |
 
-## ![Methods](https://api.iconify.design/carbon:code.svg?color=green&width=20) Các Method Tấn Công
+## Cac Method Tan Cong
 
-Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 nhóm chiến thuật chuyên sâu:
+Slayer L7 hiện đang sở hữu **hơn 75 method** khác nhau, chia thành 7 nhóm chiến thuật chuyên sâu:
 
 <details>
-  <summary><b>🌐 Volumetric & HTTP/HTTPS L7 (Tấn công tầng ứng dụng)</b></summary>
+  <summary><b>Volumetric & HTTP/HTTPS L7 (Tấn công tầng ứng dụng)</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -103,7 +114,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 </details>
 
 <details>
-  <summary><b>⏳ Slow & Exhaustion (Tấn công chậm & Cạn kiệt tài nguyên)</b></summary>
+  <summary><b>Slow & Exhaustion (Tấn công chậm & Cạn kiệt tài nguyên)</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -116,7 +127,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 </details>
 
 <details>
-  <summary><b>🚀 Khai thác Giao thức (Protocol Exploits)</b></summary>
+  <summary><b>Khai thác Giao thức (Protocol Exploits)</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -129,7 +140,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 </details>
 
 <details>
-  <summary><b>🛡️ Lạm dụng Header, URL & Bypass WAF/CDN</b></summary>
+  <summary><b>Lạm dụng Header, URL & Bypass WAF/CDN</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -159,7 +170,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 </details>
 
 <details>
-  <summary><b>🔍 Vulnerability Probes (Dò quét lỗ hổng & Log Flooding)</b></summary>
+  <summary><b>Vulnerability Probes (Dò quét lỗ hổng & Log Flooding)</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -173,7 +184,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 </details>
 
 <details>
-  <summary><b>🎮 Minecraft (Game Server Protocol)</b></summary>
+  <summary><b>Minecraft (Game Server Protocol)</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -199,7 +210,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 </details>
 
 <details>
-  <summary><b>🔌 Layer 4 (TCP/UDP) & Layer 3 (Network)</b></summary>
+  <summary><b>Layer 4 (TCP/UDP) & Layer 3 (Network)</b></summary>
   
 | Method | Mô tả | Tối ưu cho |
 | --- | --- | --- |
@@ -225,7 +236,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 | `syn_flood` | TCP SYN Flood. | Conntrack table full |
 </details>
 
-## ![Usage](https://api.iconify.design/carbon:play-outline.svg?color=white&width=20) Sử dụng
+## Su Dung
 
 ### Cú pháp lệnh chuẩn
 
@@ -255,7 +266,7 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 ./slayer -t https://foot.wiki/A2KH5C -m cfbypass -w 2000 -d 100 -p proxy.txt
 ```
 
-## ![Troubleshooting](https://api.iconify.design/carbon:bug.svg?color=red&width=20) Troubleshooting
+## Troubleshooting
 
 | Lỗi | Nguyên nhân & Cách xử lý |
 | --- | --- |
@@ -268,16 +279,20 @@ Slayer L7 hiện đang sở hữu **hơn 70 method** khác nhau, chia thành 7 n
 > [!CAUTION]
 > Không nên chạy 5000-10000 luồng Raw TCP (`tcp_connect`) trên VPS 1Core/1GB RAM. Nó sẽ làm sập VPS của bạn trước mục tiêu. Khuyến nghị 500-1500 luồng.
 
-## ![Contribution](https://api.iconify.design/carbon:user-favorite.svg?color=white&width=20) Đóng góp
+## Dong Gop
 
 Mọi đóng góp (Pull Requests) để tối ưu hóa code, thêm method mới hoặc sửa lỗi đều được hoan nghênh. Vui lòng tuân thủ chuẩn code Go.
 
-## ![License](https://api.iconify.design/carbon:document.svg?color=white&width=20) License
+## License
 
 Dự án này được phân phối dưới giấy phép **MIT License**. Xem file `LICENSE` để biết chi tiết.
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" width="100%" />
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png">
+    <img alt="Divider" src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" width="100%">
+  </picture>
   
   <h3>Made with ❤️ by @iw.uyenn._</h3>
   
